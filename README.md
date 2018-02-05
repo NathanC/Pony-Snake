@@ -1,6 +1,6 @@
 # Simple Snake Game in Pony
 
-![Gameplay recording](https://i.imgur.com/mTPy7xt.gif)
+![Gameplay recording](https://i.imgur.com/uEXpP0a.gif)
 
 Recently I stumbled across the language [Pony](https://www.ponylang.org/), and it caught my interest. According to the homepage, 
 

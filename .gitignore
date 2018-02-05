@@ -1,0 +1,5 @@
+# Ignore the binary generated from following the README.md commands
+src/snake
+
+# Ignore the default binary from the ponyc output
+src/src

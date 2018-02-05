@@ -2,6 +2,16 @@ use "collections"
 use "time"
 use "random"
 
+class val Segment
+  let pos: Point
+  let corner: Bool 
+  let direction: Direction
+
+  new val create(pos': Point, direction': Direction, corner': Bool = false) =>
+      pos = pos'
+      corner = corner'
+      direction = direction'
+
 class val Point
   let x: ISize
   let y: ISize
@@ -50,14 +60,19 @@ actor Main
     let _env: Env
     var _accepting: Bool = true
     var _timers: Timers
-    var _maybeDirection: (Direction| None) = None
-    let _snake: List[Point] = List[Point]()
+    var _move_queue: List[Direction] = List[Direction]()
+    var _current_direction: (Direction | None) = None
+    let _body: List[Segment] = List[Segment]()
     var _berry: Point
     var _dice: Dice
     let _width: ISize = 10 // [1,x] 
     let _height: ISize = 10 // [1,y]
     let _speed_in_milliseconds: U64 = 100 // time between frames
     var _points: ISize = 0
+
+    // head ---> body segment list ---> tail
+    var _head: Segment
+    var _tail: Segment
 
     new create(env: Env) =>
         env.out.print("Starting the program.")
@@ -68,10 +83,12 @@ actor Main
         let timer = Timer(Notify(this), 0, 1_000_000 * _speed_in_milliseconds)
         timers(consume timer)
 
-        _snake.unshift(Point(5,5))
+        _tail = Segment(Point(1,1), Down)
+        _head = Segment(Point(1,2), Down)
 
         _timers = timers
-        _dice = Dice(Rand)
+        (let seconds, let nanoseconds) = Time.now() // To seed PRNG
+        _dice = Dice(XorOshiro128Plus(seconds.u64(), nanoseconds.u64()))
 
         _berry = Point(_dice(1, _width.u64()).isize(), _dice(1, _height.u64()).isize())
 
@@ -83,59 +100,89 @@ actor Main
       _timers.dispose()
       _accepting = false
 
-    fun _calculate_new_head(p: Point, d: Direction): Point => match d
+    fun _calculate_new_head(p: Point, d: Direction): Segment => 
+
+      let new_pos = match d
         | Up => Point(p.x, if p.y == 1 then _height else p.y - 1 end)
         | Down => Point(p.x, if p.y == _height then 1 else p.y + 1 end)
         | Left => Point(if p.x == 1 then _width else p.x - 1 end, p.y)
         | Right => Point(if p.x == _width then 1 else p.x + 1 end, p.y)
       end
 
-    fun ref _move_player_to(new_head: Point, grow: Bool = false) =>
-        _snake.unshift(new_head)        
-        if not grow then try _snake.pop()? end end
+      Segment(new_pos, d)
 
-
-    // todo: As it stands, this allows for multiple moves being made between
-    // frames, causing certain commands in quick-succession to be lost.
-    // Current plan is either to push moves onto a queue, that is consumed at
-    // a rate of 1 per frame.
     be move(d: Direction) if _accepting => 
-      match (_maybeDirection, d) // don't allow going 180 degrees
-      | (Down, Up) => None
-      | (Left, Right) => None
-      | (Up, Down) => None
-      | (Right, Left) => None
-      else
-        _maybeDirection = d
-      end
+
+      let allowed_move = {
+        (d1: Direction, d2: Direction): Bool => 
+            match (d1, d2) // don't allow going 180 degrees
+              | (Down, Up) => false
+              | (Left, Right) => false
+              | (Up, Down) => false
+              | (Right, Left) => false
+            else
+              true
+            end
+        }
+
+      if _move_queue.size() < 3 then
+
+        try
+          let head = _move_queue.head()?()? // <-- weird notation, amirite?
+
+          if allowed_move(head, d) then
+            _move_queue.unshift(d)
+          end
+
+        else
+
+          match _current_direction
+            | let curr: Direction => 
+              if allowed_move(curr, d) then
+              _move_queue.unshift(d)
+              end
+          else
+            _move_queue.unshift(d)
+          end
+
+        end  
+
+      end // reject moves if the queue already contains 3 or more moves
+
     be move(d: Direction) => None
 
     be step() =>  
 
         if(_accepting) then
-          match _maybeDirection // todo: Find a cleaner way to use Options
+
+          try
+            _current_direction = _move_queue.pop()? //pop if it exists
+          end 
+
+          match _current_direction
             | let d: Direction => 
+              
+              let new_head = _calculate_new_head(_head.pos, d)
+              let old_head = _head
+              _head = new_head
 
-              try 
-                let head = _snake.head()?()?
-                let new_head = _calculate_new_head(head, d)
+              // turn the old head into a body segment, inside the list  
+              _body.unshift(Segment(old_head.pos, old_head.direction, not (old_head.direction is new_head.direction)))
 
-                if _snake.take(_snake.size() - 1).exists({(p: Point): Bool => p == new_head}) then
-                  _quit("Whoops! Game over, please try again.")
-                  return
-                else 
-
-                  let grow = 
-                    if new_head == _berry then
-                      _berry = Point(_dice(1, _width.u64()).isize(), _dice(1, _height.u64()).isize())
-                      _points = _points + 1
-                      true
-                    else false
-                    end
-
-                  _move_player_to(new_head, grow)
+              if _body.exists({(s: Segment): Bool => s.pos == new_head.pos}) then
+                _quit("Whoops! Game over, please try again.")
+                return
+              elseif new_head.pos == _berry then
+                _berry = Point(_dice(1, _width.u64()).isize(), _dice(1, _height.u64()).isize())
+                _points = _points + 1
+                // no need to change the old tail
+              else
+                // Standard flow-- moving into an empty space.
+                try
+                  _tail = _body.pop()? // overwrite the tail with the last body segment
                 end
               end
+            
           end
         end
 
@@ -154,27 +201,13 @@ actor Main
         buffer.push('+')
         buffer.push('\n')
 
-        // todo: Improve performance
-        // This is inefficent as it walks the whole snake upon every
-        // grid location rendering, and I should use a different pattern.
         for y in Range[ISize](1, _height + 1) do
             buffer.push('|')
             buffer.push(' ')
             for x in Range[ISize](1, _width + 1) do 
 
-                let cur = Point(x, y)
-
-                if(cur == _berry) then
-                  buffer.push('B')
-
-                else
-                  if _snake.exists({(p: Point): Bool => p == cur}) then 
-                    buffer.push('O')
-                  else buffer.push(' ')
-                  end
-                end
-
-                buffer.push(' ')
+                buffer.push(' ') // background character
+                buffer.push(' ') // spacing
             end
             buffer.push('|')
             buffer.push('\n')
@@ -189,6 +222,38 @@ actor Main
         buffer.push('+')
         // buffer.push('\n')
 
+        // now that the backrgound world has been painted, we can
+        // paint over with entities in whatever order we wish. 
+
+        let calculate_index = {(p: Point): USize => USize.from[ISize]((((_width * 2) + 4) * p.y) + (p.x * 2))}
+          
+        try 
+
+          buffer.update(calculate_index(_head.pos), '#')?
+
+          for segment_node in _body.nodes() do
+            let segment = segment_node()?
+
+            let char: U8 = 
+              if segment.corner == true then
+                '+'
+              else match segment.direction
+                  | Down => '|'
+                  | Up => '|'
+                  | Left => '-'
+                  | Right => '-'
+                end
+
+              end
+
+            buffer.update(calculate_index(segment.pos), char)?
+          end
+
+          buffer.update(calculate_index(_tail.pos), '*')?
+
+          buffer.update(calculate_index(_berry), 'O')?
+        end
+    
         let final: Array[U8 val] val = consume buffer
         
         _clear_screen() 
